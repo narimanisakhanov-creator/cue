@@ -30,9 +30,9 @@ async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTok
   return full;
 }
 
-async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL }) {
   const Anthropic = require('@anthropic-ai/sdk');
-  const client = new Anthropic({ apiKey });
+  const client = new Anthropic({ apiKey, baseURL: baseURL || undefined });
   const messages = turns.map((t, i) => {
     const last = i === turns.length - 1;
     if (last && imageDataUrl && t.role === 'user') {

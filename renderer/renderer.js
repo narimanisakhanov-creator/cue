@@ -350,6 +350,7 @@
     $('#key-openai').value = settings.apiKeys.openai || '';
     $('#key-anthropic').value = settings.apiKeys.anthropic || '';
     $('#key-gemini').value = settings.apiKeys.gemini || '';
+    $('#base-url').value = (settings.baseURLs && settings.baseURLs[settings.provider]) || '';
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
     $('#s-status').textContent = statusText();
@@ -361,9 +362,12 @@
     return 'Активен: ' + settings.provider + ' · ключи: ' + (has.join(', ') || 'не заданы') + ' · распознавание: ' + stt;
   }
   document.querySelectorAll('#provider-seg button').forEach((b) => b.addEventListener('click', () => {
+    if (!settings.baseURLs) settings.baseURLs = {};
+    settings.baseURLs[settings.provider] = $('#base-url').value.trim();
     settings.provider = b.dataset.provider;
     document.querySelectorAll('#provider-seg button').forEach((x) => x.classList.toggle('on', x === b));
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
+    $('#base-url').value = (settings.baseURLs && settings.baseURLs[settings.provider]) || '';
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
     $('#s-status').textContent = statusText();
   }));
@@ -371,6 +375,8 @@
     settings.apiKeys.openai = $('#key-openai').value.trim();
     settings.apiKeys.anthropic = $('#key-anthropic').value.trim();
     settings.apiKeys.gemini = $('#key-gemini').value.trim();
+    if (!settings.baseURLs) settings.baseURLs = {};
+    settings.baseURLs[settings.provider] = $('#base-url').value.trim();
     if (!settings.models[settings.provider]) settings.models[settings.provider] = {};
     settings.models[settings.provider].fast = $('#model-fast').value.trim();
     settings.models[settings.provider].smart = $('#model-smart').value.trim();
