@@ -1,7 +1,7 @@
 {
   "name": "cue",
-  "version": "0.1.0",
-  "description": "Open-source macOS invisible AI overlay — three separate inputs (screen, mic, system audio) into an LLM. A Cluely-style copilot for meetings and coding problems.",
+  "version": "0.2.0",
+  "description": "Private screen and meeting assistant for Windows and macOS with independent local speech recognition.",
   "license": "GPL-3.0-or-later",
   "author": "cue",
   "main": "main.js",
@@ -19,7 +19,10 @@
       "main.js",
       "preload.js",
       "src/**/*",
-      "renderer/**/*"
+      "renderer/**/*",
+      "speech/*.py",
+      "speech/*.txt",
+      "speech/*.ps1"
     ],
     "mac": {
       "target": [
@@ -59,5 +62,8 @@
     "@google/genai": "^0.3.0",
     "lucide-static": "^0.468.0",
     "openai": "^4.73.0"
+  },
+  "allowScripts": {
+    "electron@33.2.1": true
   }
 }

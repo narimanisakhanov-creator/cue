@@ -3,6 +3,14 @@
   const { icon } = window.ICONS;
   const cue = window.cue; // exposed by preload
   const $ = (s) => document.querySelector(s);
+  const isMac = cue.platform === 'darwin';
+  const isWindows = cue.platform === 'win32';
+  const modifierLabel = isMac ? '⌘' : 'Ctrl';
+  const commandKey = (event) => isMac ? event.metaKey : event.ctrlKey;
+  $('#modifier-hint').textContent = modifierLabel;
+  $('#send-btn').title = 'Отправить вопрос (Enter)';
+  $('#more-btn').title = 'Настройки (' + modifierLabel + '+,)';
+  $('.act[data-mode="assist"]').title = 'Автоматические подсказки; разовая помощь: ' + modifierLabel + '+Enter';
 
   // ---- paint icons -------------------------------------------------------
   $('#logo-btn').innerHTML = icon('logo', { size: 18 });
@@ -208,8 +216,9 @@
     }
   });
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey) { e.preventDefault(); send(); }
-    if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); runMode('assist', ''); }
+    if (e.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey) return;
+    if (commandKey(e)) { e.preventDefault(); runMode('assist', ''); }
+    else if (!e.metaKey && !e.ctrlKey) { e.preventDefault(); send(); }
   });
 
   // Smart toggle
@@ -227,84 +236,169 @@
     $('#live-dot').style.display = collapsed ? 'none' : '';
   });
 
-  // Start from the click so macOS accepts getDisplayMedia; the state event is deduplicated.
-  $('#stop-btn').addEventListener('click', () => {
-    const turningOn = !$('#stop-btn').classList.contains('active');
-    if (turningOn) startSystemAudio();
-    cue.captureToggle();
-  });
+  $('#stop-btn').addEventListener('click', () => { cue.captureToggle(); });
 
-  // ---- capture: mic (renderer side) --------------------------------------
-  let audioCtx = null, micStream = null, micNode = null, micProc = null;
-  async function startMic() {
-    if (micStream) return;
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
-      audioCtx = new AudioContext({ sampleRate: 16000 });
-      micNode = audioCtx.createMediaStreamSource(micStream);
-      micProc = audioCtx.createScriptProcessor(4096, 1, 1);
-      const sink = audioCtx.createGain(); sink.gain.value = 0; // run processor silently
-      micNode.connect(micProc); micProc.connect(sink); sink.connect(audioCtx.destination);
-      micProc.onaudioprocess = (e) => {
-        const f = e.inputBuffer.getChannelData(0);
-        const out = new Int16Array(f.length);
-        for (let i = 0; i < f.length; i++) { const s = Math.max(-1, Math.min(1, f[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-        cue.micPcm(out.buffer);
-      };
-    } catch (err) {
-      cue.log('mic error: ' + (err && err.message));
-    }
+  // Both sources use a generation-bound worklet. Display video stays live until stop.
+  let captureSession = null;
+  const sourceStarts = new Map(); // generation -> { you, them }: serializes setup per source across start/stop races
+  function sourceStatus(source, state, message) {
+    cue.audioStatus({ generation: source.generation, channel: source.channel, state, message });
   }
-  function stopMic() {
-    if (micProc) { micProc.disconnect(); micProc.onaudioprocess = null; micProc = null; }
-    if (micNode) { micNode.disconnect(); micNode = null; }
-    if (audioCtx) { audioCtx.close(); audioCtx = null; }
-    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  function sourceIsCurrent(source) {
+    return captureSession && captureSession.generation === source.generation && !source.stopping;
   }
-
-  // ---- capture: system/meeting audio (getDisplayMedia loopback, in cue's process) ----
-  let sysStream = null, sysCtx = null, sysNode = null, sysProc = null;
-  let sysStarting = false;
-  async function startSystemAudio() {
-    if (sysStream || sysStarting) return;
-    sysStarting = true;
+  async function stopSource(source) {
+    if (source.stopPromise) return source.stopPromise;
+    source.stopping = true;
+    source.stopPromise = (async () => {
+      if (source.stream) source.stream.getTracks().forEach((track) => { track.onended = null; });
+      if (source.node) source.node.disconnect();
+      const processor = source.processor;
+      if (processor) {
+        // Ask the worklet for the tail it still holds; a dead worklet can never answer.
+        await new Promise((resolve) => {
+          let settled = false;
+          const finish = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
+          const timer = setTimeout(finish, 1000);
+          source.drained = finish;
+          try { processor.port.postMessage({ type: 'flush' }); } catch (error) { finish(); }
+        });
+        source.drained = null;
+        if (source.processor === processor) source.processor = null;
+        try { processor.disconnect(); } catch (error) { /* already detached */ }
+        try { processor.port.close(); } catch (error) { /* already closed */ }
+      }
+      if (source.stream) source.stream.getTracks().forEach((track) => track.stop());
+      if (source.context) {
+        const context = source.context;
+        source.context = null;
+        try { await context.close(); } catch (error) { /* already closed */ }
+      }
+    })();
+    return source.stopPromise;
+  }
+  const micConstraints = isWindows
+    ? { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    : { channelCount: 1, echoCancellation: true, noiseSuppression: true };
+  // Ask only for what we consume; the display video stays live for the whole session.
+  const loopbackConstraints = { video: { frameRate: 1, width: 320, height: 180 }, audio: true };
+  async function startSource(source) {
+    if (!sourceIsCurrent(source)) return;
+    sourceStatus(source, 'starting');
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-      stream.getVideoTracks().forEach((t) => t.stop()); // we only want the audio
+      const stream = source.channel === 'you'
+        ? await navigator.mediaDevices.getUserMedia({ audio: micConstraints })
+        : await navigator.mediaDevices.getDisplayMedia(loopbackConstraints);
+      if (!sourceIsCurrent(source)) { stream.getTracks().forEach((track) => track.stop()); return; }
+      source.stream = stream;
       const tracks = stream.getAudioTracks();
-      if (!tracks.length) { cue.log('system audio: no loopback track (macOS loopback unsupported here)'); stream.getTracks().forEach((t) => t.stop()); return; }
-      sysStream = stream;
-      sysCtx = new AudioContext({ sampleRate: 16000 });
-      sysNode = sysCtx.createMediaStreamSource(new MediaStream(tracks));
-      sysProc = sysCtx.createScriptProcessor(4096, 1, 1);
-      const sink = sysCtx.createGain(); sink.gain.value = 0;
-      sysNode.connect(sysProc); sysProc.connect(sink); sink.connect(sysCtx.destination);
-      sysProc.onaudioprocess = (e) => {
-        const f = e.inputBuffer.getChannelData(0);
-        const out = new Int16Array(f.length);
-        for (let i = 0; i < f.length; i++) { const s = Math.max(-1, Math.min(1, f[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-        cue.systemPcm(out.buffer);
+      if (!tracks.length || tracks.some((track) => track.readyState !== 'live')) {
+        throw new Error(source.channel === 'you' ? 'Нет активной дорожки микрофона.' : 'Windows не предоставила живую дорожку loopback. Проверьте устройство вывода в настройках звука.');
+      }
+      const video = stream.getVideoTracks()[0];
+      if (video && video.readyState !== 'live') throw new Error('Windows не предоставила живой поток экрана для захвата звука.');
+      stream.getTracks().forEach((track) => {
+        track.onended = () => {
+          if (!sourceIsCurrent(source)) return;
+          sourceStatus(source, 'error', 'Источник отключён или доступ к захвату отозван. Остановите и снова включите запись.');
+          stopSource(source).catch((error) => cue.log('audio stop: ' + error.message));
+        };
+      });
+      const context = new AudioContext({ sampleRate: 16000 });
+      source.context = context;
+      await context.resume();
+      if (!sourceIsCurrent(source)) { await stopSource(source); return; }
+      await context.audioWorklet.addModule('pcm-processor.js');
+      if (!sourceIsCurrent(source)) { await stopSource(source); return; }
+      const node = context.createMediaStreamSource(new MediaStream(tracks));
+      const processor = new AudioWorkletNode(context, 'pcm-processor', { outputChannelCount: [1] });
+      const sink = context.createGain();
+      sink.gain.value = 0;
+      node.connect(processor);
+      processor.connect(sink);
+      sink.connect(context.destination);
+      source.node = node;
+      source.processor = processor;
+      source.sink = sink;
+      processor.port.onmessage = ({ data }) => {
+        if (data.type === 'pcm') {
+          // Forward the tail too: during the drain phase the session is already closed on the
+          // main side, but the audio still belongs to this generation.
+          if (!sourceIsCurrent(source) && !source.stopping) return;
+          const payload = { generation: source.generation, pcm: data.pcm };
+          if (source.channel === 'you') cue.micPcm(payload); else cue.systemPcm(payload);
+        } else if (data.type === 'drained' && source.drained) source.drained();
       };
-      cue.log('system audio: capturing loopback');
-    } catch (err) {
-      cue.log('system audio error: ' + (err && err.message));
-    } finally {
-      sysStarting = false;
+      processor.onprocessorerror = () => {
+        if (!sourceIsCurrent(source) && !source.drained) return;
+        sourceStatus(source, 'error', 'Обработчик звука остановился. Остановите и снова включите запись.');
+        // A failed worklet cannot answer a flush request.
+        const failed = source.processor;
+        source.processor = null;
+        if (failed) {
+          try { failed.disconnect(); } catch (error) { /* already detached */ }
+          try { failed.port.close(); } catch (error) { /* already closed */ }
+        }
+        if (source.drained) source.drained();
+        stopSource(source).catch((error) => cue.log('audio stop: ' + error.message));
+      };
+      if (tracks.some((track) => track.readyState !== 'live') || context.state !== 'running') throw new Error('Источник звука не запустился. Проверьте разрешения и устройство.');
+      if (!sourceIsCurrent(source)) { await stopSource(source); return; }
+      sourceStatus(source, 'active');
+    } catch (error) {
+      if (sourceIsCurrent(source)) {
+        sourceStatus(source, 'error', (source.channel === 'you' ? 'Не удалось включить микрофон. Проверьте разрешение Windows и устройство. ' : 'Не удалось включить звук компьютера. Проверьте устройство вывода и разрешение захвата. ') + error.message);
+      }
+      await stopSource(source);
     }
   }
-  function stopSystemAudio() {
-    if (sysProc) { sysProc.disconnect(); sysProc.onaudioprocess = null; sysProc = null; }
-    if (sysNode) { sysNode.disconnect(); sysNode = null; }
-    if (sysCtx) { sysCtx.close(); sysCtx = null; }
-    if (sysStream) { sysStream.getTracks().forEach((t) => t.stop()); sysStream = null; }
+  function applyCaptureState({ active, generation }) {
+    $('#live-dot').classList.toggle('off', !active);
+    $('#stop-btn').classList.toggle('active', active);
+    if (active) {
+      if (captureSession && captureSession.generation === generation) return;
+      const previous = captureSession;
+      if (previous) {
+        // A start without a matching stop would otherwise leave the old capture running.
+        captureSession = null;
+        const previousStarts = sourceStarts.get(previous.generation);
+        if (previousStarts) sourceStarts.delete(previous.generation);
+        const settled = previousStarts ? Promise.all([previousStarts.you, previousStarts.them]) : Promise.resolve();
+        settled.then(() => Promise.all(previous.sources.map(stopSource))).catch((error) => cue.log('audio stop: ' + error.message));
+      }
+      const sources = ['you', 'them'].map((channel) => ({ channel, generation, stopping: false, reported: false }));
+      captureSession = { generation, sources };
+      const starts = { you: Promise.resolve(), them: Promise.resolve() };
+      sourceStarts.set(generation, starts);
+      sources.forEach((source) => {
+        starts[source.channel] = starts[source.channel]
+          .then(() => startSource(source))
+          .catch((error) => cue.log('audio setup: ' + error.message));
+      });
+      clearMessages(); clearLiveTranscript(); assistStateEl.textContent = 'Слушаю';
+    } else {
+      if (!captureSession || captureSession.generation !== generation) return;
+      const stopped = captureSession;
+      captureSession = null;
+      const starts = sourceStarts.get(generation);
+      if (starts) sourceStarts.delete(generation);
+      const awaited = sources => Promise.all(sources.map(stopSource));
+      // Never announce "stopped" before setup has settled: a late startSource would otherwise revive the source.
+      const settled = starts ? Promise.all([starts.you, starts.them]) : Promise.resolve();
+      settled.then(awaited.bind(null, stopped.sources)).then(() => {
+        stopped.sources.forEach((source) => {
+          if (source.reported) return;
+          source.reported = true;
+          sourceStatus(source, 'stopped');
+        });
+        cue.audioDrained({ generation });
+      }).catch((error) => cue.log('audio drain: ' + error.message));
+      assistStateEl.textContent = 'Готово';
+    }
   }
 
   // ---- events from main --------------------------------------------------
-  cue.on('capture:state', ({ active }) => {
-    $('#live-dot').classList.toggle('off', !active);
-    $('#stop-btn').classList.toggle('active', active);
-    if (active) { startMic(); startSystemAudio(); clearMessages(); clearLiveTranscript(); assistStateEl.textContent = 'Слушаю'; } else { stopMic(); stopSystemAudio(); assistStateEl.textContent = 'Готово'; }
-  });
+  cue.on('capture:state', applyCaptureState);
   cue.on('transcript', appendTranscript);
   cue.on('llm:start', ({ userBubble, small, append, responseLabel }) => {
     if (append) finalizeAi();
@@ -316,6 +410,7 @@
   });
   cue.on('llm:token', ({ text }) => appendToken(text));
   cue.on('llm:done', ({ suppress }) => { if (suppress) removeAi(); else finalizeAi(); assistStateEl.textContent = 'Готово'; setBusy(false); });
+  cue.on('llm:idle', () => { setBusy(false); assistStateEl.textContent = 'Готово'; });
   cue.on('llm:error', ({ message }) => {
     if (!aiEl) startAi(true);
     aiEl.dataset.raw = message; finalizeAi(); assistStateEl.textContent = 'Ошибка'; setBusy(false);
@@ -335,15 +430,58 @@
     statusTimer = setTimeout(() => el.classList.remove('show'), 11000);
   }
   cue.on('status', ({ message }) => { cue.log('[status] ' + message); showStatus(message); });
+  const audioStateLabels = { starting: 'подключение…', active: 'захват активен', error: 'ошибка', stopped: 'остановлен' };
+  cue.on('audio:status', ({ channel, state, message }) => {
+    if (!['you', 'them'].includes(channel) || !audioStateLabels[state]) return;
+    const source = channel === 'you' ? 'Микрофон' : 'Звук компьютера';
+    const el = $('#audio-' + channel);
+    el.textContent = source + ': ' + audioStateLabels[state];
+    el.dataset.state = state;
+    el.title = message || '';
+    if (message) showStatus(source + ': ' + message);
+  });
 
   // ---- settings ----------------------------------------------------------
   const scrim = $('#settings-scrim');
-  function openSettings() { fillSettings(); scrim.classList.remove('hidden'); }
-  function closeSettings() { saveSettings(); scrim.classList.add('hidden'); }
+  let settingsReturnFocus = null;
+  function openSettings() {
+    if (!settings) return;
+    if (scrim.classList.contains('hidden')) settingsReturnFocus = document.activeElement;
+    fillSettings(); scrim.classList.remove('hidden'); setIgnore(false);
+    $('#s-close').focus();
+  }
+  async function closeSettings() {
+    try {
+      await saveSettings();
+      scrim.classList.add('hidden');
+      if (settingsReturnFocus) settingsReturnFocus.focus();
+    } catch (error) {
+      $('#s-status').textContent = 'Не удалось сохранить настройки: ' + error.message;
+    }
+  }
   $('#more-btn').addEventListener('click', openSettings);
   $('#s-close').addEventListener('click', closeSettings);
   scrim.addEventListener('click', (e) => { if (e.target === scrim) closeSettings(); });
   cue.on('settings:open', openSettings);
+
+  const STT_DEFAULTS = {
+    local: { baseURL: 'http://127.0.0.1:8765/v1', model: 'small' },
+    openai: { baseURL: 'https://api.openai.com/v1', model: 'whisper-1' }
+  };
+  function updateSpeechHelp() {
+    const provider = $('#stt-provider').value;
+    $('#stt-help').textContent = provider === 'local'
+      ? 'Нужен запущенный локальный сервис faster-whisper по указанному URL. Первый запуск может потребовать загрузки модели. Ключ речи не нужен; ключ чата не используется.'
+      : 'Нужен endpoint с поддержкой /audio/transcriptions и доступом к указанной модели. Ключ речи независим от ключа чата. Chat-only gateway не подходит.';
+  }
+  $('#stt-provider').addEventListener('change', () => {
+    const defaults = STT_DEFAULTS[$('#stt-provider').value];
+    if (defaults) {
+      $('#stt-base-url').value = defaults.baseURL;
+      $('#stt-model').value = defaults.model;
+    }
+    updateSpeechHelp();
+  });
 
   function fillSettings() {
     document.querySelectorAll('#provider-seg button').forEach((b) => b.classList.toggle('on', b.dataset.provider === settings.provider));
@@ -353,13 +491,20 @@
     $('#base-url').value = (settings.baseURLs && settings.baseURLs[settings.provider]) || '';
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    const provider = settings.sttProvider || 'local';
+    $('#stt-provider').value = provider;
+    const defaults = STT_DEFAULTS[provider] || { baseURL: '', model: '' };
+    $('#stt-base-url').value = settings.sttBaseURL || defaults.baseURL;
+    $('#stt-model').value = settings.sttModel || defaults.model;
+    $('#stt-api-key').value = settings.sttApiKey || '';
+    $('#stt-language').value = settings.sttLanguage || 'auto';
+    updateSpeechHelp();
     $('#s-status').textContent = statusText();
   }
   function statusText() {
     const k = settings.apiKeys;
     const has = [k.openai && 'OpenAI', k.anthropic && 'Anthropic', k.gemini && 'Gemini'].filter(Boolean);
-    const stt = k.openai ? 'Whisper' : (k.gemini ? 'Gemini' : 'none');
-    return 'Активен: ' + settings.provider + ' · ключи: ' + (has.join(', ') || 'не заданы') + ' · распознавание: ' + stt;
+    return 'Провайдер ИИ: ' + settings.provider + ' · ключи чата: ' + (has.join(', ') || 'не заданы') + '. Наличие ключей не подтверждает доступ к моделям. Состояние источников звука — в живом конспекте.';
   }
   document.querySelectorAll('#provider-seg button').forEach((b) => b.addEventListener('click', () => {
     if (!settings.baseURLs) settings.baseURLs = {};
@@ -380,23 +525,29 @@
     if (!settings.models[settings.provider]) settings.models[settings.provider] = {};
     settings.models[settings.provider].fast = $('#model-fast').value.trim();
     settings.models[settings.provider].smart = $('#model-smart').value.trim();
+    settings.sttProvider = $('#stt-provider').value;
+    settings.sttBaseURL = $('#stt-base-url').value.trim();
+    settings.sttModel = $('#stt-model').value.trim();
+    settings.sttApiKey = $('#stt-api-key').value.trim();
+    settings.sttLanguage = $('#stt-language').value;
     await cue.settingsSet(settings);
-  }
-
-  // ---- example conversation (matches the reference screenshot) ------------
-  function showExample() {
-    clearMessages();
-    addUserBubble('Что сказать?');
-    const ai = document.createElement('div');
-    ai.className = 'ai-text';
-    ai.textContent = '“A discounted cash flow model values a company by projecting future free cash flows and discounting them to present value using the weighted average cost of capital.”';
-    messages.appendChild(ai);
   }
 
   // ---- global keys -------------------------------------------------------
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !scrim.classList.contains('hidden')) closeSettings();
-    if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(); }
+    if (e.key === 'Escape') {
+      if (!obScrim.classList.contains('hidden')) finishOnboard();
+      else if (!scrim.classList.contains('hidden')) closeSettings();
+    }
+    if (commandKey(e) && e.key === ',' && !e.altKey && !e.shiftKey) { e.preventDefault(); openSettings(); }
+    if (e.key === 'Tab') {
+      const dialog = !obScrim.classList.contains('hidden') ? $('#onboard') : !scrim.classList.contains('hidden') ? $('#settings') : null;
+      if (!dialog) return;
+      const controls = Array.from(dialog.querySelectorAll('button, input, select')).filter((el) => !el.disabled && getComputedStyle(el).visibility !== 'hidden');
+      const first = controls[0], last = controls[controls.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+    }
   });
 
   // ---- click-through: only the UI blocks the mouse; empty gaps pass to your screen ----
@@ -411,36 +562,49 @@
 
   // ---- onboarding / first-run tutorial -----------------------------------
   const obScrim = $('#onboard-scrim');
+  const permissionStep = isWindows ? {
+    icon: '🔐',
+    title: 'Микрофон и звук в Windows',
+    body: 'В разделе конфиденциальности включите <strong>доступ к микрофону</strong>, доступ для приложений и <strong>доступ для классических приложений</strong>. cue — классическое приложение: отдельного переключателя cue может не быть.<br><br>В настройках звука проверьте устройство <strong>ввода</strong> и устройство <strong>вывода</strong>, через которое слышен созвон. Запись звука компьютера не требует включать «Стерео микшер».<br><br>Для снимков экрана в Windows нет отдельного разрешения «Запись экрана». Защищённые окна могут не захватываться. После изменения настроек остановите и снова включите запись.',
+    buttons: [
+      { label: 'Доступ к микрофону', action: () => cue.openPane('ms-settings:privacy-microphone') },
+      { label: 'Устройства звука', action: () => cue.openPane('ms-settings:sound') }
+    ]
+  } : isMac ? {
+    icon: '🔐',
+    title: 'Разрешите cue видеть и слышать',
+    body: 'В настройках macOS разрешите <strong>cue</strong> доступ к микрофону и запись экрана / системного аудио (название раздела зависит от версии ОС). Микрофон нужен для вашей речи; доступ к экрану — для снимков и звука компьютера.<br><br>Если система попросит, перезапустите cue. Затем включите запись и проверьте состояния обоих источников в живом конспекте.',
+    buttons: [
+      { label: 'Настройки микрофона', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone') },
+      { label: 'Настройки записи экрана', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture') }
+    ]
+  } : {
+    icon: '🔐', title: 'Доступ к экрану и микрофону',
+    body: 'Разрешите cue использовать микрофон и экран в настройках вашей системы. Поддержка звука компьютера зависит от ОС. После запуска записи проверьте состояния источников в живом конспекте.'
+  };
+  const shortcut = (...keys) => [modifierLabel, ...keys].map((key) => '<span class="kbd">' + key + '</span>').join(' ');
   const OB_STEPS = [
     {
-      icon: '👋',
-      title: 'Добро пожаловать в cue',
-      body: 'cue — это приватный ИИ-помощник поверх экрана. Он может <strong>видеть экран</strong>, <strong>слышать разговоры</strong> и помогать отвечать на вопросы или решать задачи — оставаясь скрытым в большинстве трансляций экрана.<br><br>Эта короткая инструкция поможет начать работу примерно за минуту.'
+      icon: '👋', title: 'Добро пожаловать в cue',
+      body: 'cue помогает вести <strong>живой конспект</strong>, задавать вопросы по разговору и экрану и готовить итоги встречи.<br><br>До записи получите согласие участников и проверьте правила встречи. Аудио и снимки могут отправляться выбранным API-провайдерам; локальный Whisper распознаёт речь на этом компьютере.'
     },
+    permissionStep,
     {
-      icon: '🔐',
-      title: 'Разрешите cue видеть и слышать',
-      body: 'cue нужны два разрешения macOS. Нажмите каждую кнопку, включите <strong>cue</strong> в открывшемся окне и вернитесь сюда.<ul><li><strong>Микрофон</strong> — чтобы слышать вас</li><li><strong>Запись экрана</strong> — чтобы видеть экран и слышать разговор</li></ul>',
-      buttons: [
-        { label: 'Открыть настройки микрофона', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone') },
-        { label: 'Открыть настройки записи экрана', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture') }
-      ]
-    },
-    {
-      icon: '🔑',
-      title: 'Подключите провайдера ИИ',
-      body: 'cue использует <strong>ваш собственный</strong> ключ API — выберите <span class="hl">OpenAI</span>, <span class="hl">Anthropic</span> или <span class="hl">Google Gemini</span>. Получите ключ у провайдера и вставьте его в настройки cue.<br><br><strong>Важно:</strong> для прослушивания нужен доступ к распознаванию речи (ключ OpenAI с Whisper или ключ Gemini). Ключ только для чата всё равно позволит работать с экраном и кодом.',
+      icon: '🔑', title: 'Настройте ИИ и распознавание речи',
+      body: 'Для ответов выберите <strong>OpenAI, Anthropic или Gemini</strong>, укажите свой ключ, endpoint и модель. Для этого форка используйте параметры wikivibe и модель <strong>gpt-6.1-sol</strong> в OpenAI-совместимом подключении.<br><br><strong>Речь настраивается отдельно.</strong> По умолчанию выбран локальный Whisper: нужен работающий сервис по адресу <span class="hl">http://127.0.0.1:8765/v1</span>. Для облачного распознавания нужен отдельный сервис с поддержкой аудио; доступ к чату не означает доступ к речи.',
       buttons: [{ label: 'Открыть настройки cue', action: () => { finishOnboard(); openSettings(); } }]
     },
     {
-      icon: '🫥',
-      title: 'Оставайтесь скрытым в Zoom',
-      body: 'cue автоматически скрыт в большинстве трансляций экрана (Google Meet, Teams, QuickTime — ничего настраивать не нужно). <strong>Для Zoom нужна одна настройка:</strong><br><br>Zoom → <span class="hl">Настройки</span> → <span class="hl">Демонстрация экрана</span> → <span class="hl">Расширенные</span> → <strong>Режим захвата экрана</strong> → выберите <strong>«Расширенный захват с фильтрацией окон».</strong><br><br>Не выбирайте режим <strong>без</strong> фильтрации окон — тогда cue будет виден.'
+      icon: '🎙️', title: 'Запись и живой конспект',
+      body: 'Нажмите <strong>квадрат на верхней панели</strong>, чтобы начать запись. В живом конспекте отдельно показаны <strong>микрофон</strong> и <strong>звук компьютера</strong>. «Захват активен» означает подключённый источник, а не успешное распознавание.<br><br>Произнесите фразу и дождитесь реплики «Вы»; включите звук созвона и проверьте реплики «Собеседник». Текст появляется с задержкой. При ошибке прочитайте сообщение и проверьте разрешения, устройства и сервис речи.<br><br>Нажмите квадрат ещё раз, чтобы остановить запись. cue обработает последние фразы и запросит итог; не начинайте новую запись до завершения, если нужен полный итог текущей встречи.'
     },
     {
-      icon: '✨',
-      title: 'Всё готово',
-      body: 'Как пользоваться cue:<ul><li><span class="kbd">⌘</span> <span class="kbd">↵</span> — <strong>помощь</strong> по экрану или разговору</li><li><span class="kbd">⌘</span> <span class="kbd">H</span> — решить задачу на экране</li><li>Нажмите <strong>▢</strong> на верхней панели, чтобы начать прослушивание</li><li>Введите вопрос и нажмите <span class="kbd">↵</span></li></ul>Открыть инструкцию снова можно нажатием на <strong>логотип cue</strong>. Выход — <span class="kbd">⌘</span><span class="kbd">⇧</span><span class="kbd">X</span>.'
+      icon: '✨', title: 'Помощь, вопросы и итоги',
+      body: '<ul><li>' + shortcut('Enter') + ' — разовая помощь по экрану и разговору. Кнопка <strong>Помощь</strong> включает автоматические подсказки по разговору без снимков.</li><li>' + shortcut('H') + ' — задача на экране. Запись микрофона для снимка не нужна; в вопросе явно укажите «на экране» или «скриншот», если нужен анализ изображения.</li><li><strong>Что сказать?</strong> и <strong>Уточняющие вопросы</strong> используют конспект разговора.</li><li>Введите вопрос и нажмите <span class="kbd">Enter</span>. <span class="kbd">Shift</span> + <span class="kbd">Enter</span> — новая строка.</li><li><strong>Итоги</strong> — сводка текущего разговора. После остановки cue также готовит и сохраняет итог. Кнопка копирования копирует конспект и ответы.</li></ul>'
+    },
+    {
+      icon: '🖥️', title: 'Демонстрация экрана и управление',
+      body: 'Исключение cue из захвата экрана работает <strong>по возможности, без гарантии</strong>. Окно может попасть в трансляцию или запись: проверьте предпросмотр в своей программе. Не используйте cue для обхода правил или требований согласия.<br><br><strong>Скрыть</strong> сворачивает панель, но не останавливает запись. ' + shortcut('Shift', 'T') + ' убирает cue в трей; иконка в трее возвращает окно. ' + shortcut('Shift', 'X') + ' — выход. Инструкция доступна по логотипу cue, настройки — по кнопке «…» или ' + shortcut(',') + '.'
     }
   ];
   let obIndex = 0;
@@ -457,9 +621,15 @@
     $('#ob-next').textContent = obIndex === OB_STEPS.length - 1 ? 'Готово' : 'Далее';
     $('#ob-skip').style.visibility = obIndex === OB_STEPS.length - 1 ? 'hidden' : 'visible';
   }
-  function showOnboard() { obIndex = 0; renderOnboard(); obScrim.classList.remove('hidden'); setIgnore(false); }
+  let onboardReturnFocus = null;
+  function showOnboard() {
+    onboardReturnFocus = document.activeElement;
+    obIndex = 0; renderOnboard(); obScrim.classList.remove('hidden'); setIgnore(false);
+    $('#ob-next').focus();
+  }
   async function finishOnboard() {
     obScrim.classList.add('hidden');
+    if (onboardReturnFocus) onboardReturnFocus.focus();
     if (settings && !settings.onboarded) { settings.onboarded = true; await cue.settingsSet({ onboarded: true }); }
   }
   $('#ob-next').addEventListener('click', () => { if (obIndex === OB_STEPS.length - 1) finishOnboard(); else { obIndex++; renderOnboard(); } });
@@ -471,11 +641,9 @@
   (async function boot() {
     settings = await cue.settingsGet();
     smartBtn.classList.toggle('on', !!settings.smart);
-    showExample();
     syncPlaceholder();
     const st = await cue.captureState();
-    $('#live-dot').classList.toggle('off', !st.active);
-    $('#stop-btn').classList.toggle('active', st.active);
+    applyCaptureState(st);
     if (!settings.onboarded) showOnboard();
   })();
 })();

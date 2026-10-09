@@ -1,0 +1,12 @@
+# cue local speech service — pinned runtime dependencies (CPU only, no CUDA).
+# Installed into the per-user venv by speech/install-windows.ps1.
+# Verified together on Python 3.12 / Windows x64.
+
+faster-whisper==1.2.1      # CTranslate2 Whisper inference (model "small", int8)
+ctranslate2==4.8.2         # inference engine used by faster-whisper
+av==16.0.1                 # audio decoding (decode_audio); 19.x breaks metadata_errors,
+                           # 14.4 has no cp312 Windows wheel and needs an MSVC build
+onnxruntime==1.31.0        # Silero VAD backend used by vad_filter
+fastapi==0.143.0           # HTTP API
+uvicorn==0.54.0            # ASGI server (plain, h11 — no websockets needed)
+python-multipart==0.0.32   # multipart/form-data parsing for audio uploads

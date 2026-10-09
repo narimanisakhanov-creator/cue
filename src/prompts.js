@@ -30,7 +30,7 @@ const MODES = {
   // Meeting copilot: what to say next.
   say: {
     needsScreen: false,
-    userBubble: 'What should I say?',
+    userBubble: 'Что сказать?',
     small: false,
     system:
       'You are cue, whispering suggested replies to the user during a live conversation. ' +
@@ -46,7 +46,7 @@ const MODES = {
   // Smart follow-up questions to keep the conversation going.
   followup: {
     needsScreen: false,
-    userBubble: 'Follow-up questions',
+    userBubble: 'Уточняющие вопросы',
     small: true,
     system:
       'You are cue. Given the conversation, suggest 2–4 sharp, relevant follow-up questions the user could ask next ' +
@@ -90,7 +90,7 @@ const MODES = {
   // Explicit LeetCode/coding screenshot solver (Cmd+H). Screen only.
   leetcode: {
     needsScreen: true,
-    userBubble: 'Solve what\'s on screen',
+    userBubble: 'Решить задачу на экране',
     small: false,
     system:
       'You are an expert competitive programmer. The screenshot contains a coding problem. ' +

@@ -8,10 +8,15 @@ const FILE = path.join(app.getPath('userData'), 'cue-data.json');
 const DEFAULTS = {
   provider: 'openai',
   smart: false,
-  apiKeys: { openai: '', anthropic: '', gemini: '', deepgram: '' },
+  sttProvider: 'local',
+  sttBaseURL: 'http://127.0.0.1:8765/v1',
+  sttModel: 'small',
+  sttApiKey: '',
+  sttLanguage: 'ru',
+  apiKeys: { openai: '', anthropic: '', gemini: '' },
   baseURLs: { openai: 'https://api.wikivibe.ru/v1', anthropic: '', gemini: 'https://api.wikivibe.ru/v1' },
   models: {
-    openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o' },
+    openai: { fast: 'gpt-6.1-sol', smart: 'gpt-6.1-sol' },
     anthropic: { fast: 'claude-3-5-haiku-latest', smart: 'claude-3-5-sonnet-latest' },
     gemini: { fast: 'gemini-3-flash', smart: 'gemini-3-flash' }
   }

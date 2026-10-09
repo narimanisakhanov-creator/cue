@@ -108,6 +108,10 @@ button:focus { outline: none; }
 .view-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 20px; }
 .view-title { color: var(--tx-2); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
 #transcript-count, #assist-state { color: var(--tx-mut); font-size: 11px; white-space: nowrap; }
+#audio-sources { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; color: var(--tx-2); font-size: 11px; line-height: 1.4; }
+#audio-sources [data-state="active"] { color: #86efac; }
+#audio-sources [data-state="error"] { color: #fca5a5; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 3px; }
 #live-view { border-bottom: 1px solid rgba(255,255,255,0.10); padding-bottom: 12px; }
 #live-transcript { display: flex; flex-direction: column; gap: 8px; min-height: 72px; max-height: 184px; margin-top: 8px; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
 #live-transcript:empty::before { content: 'Включите запись, чтобы видеть разговор в реальном времени'; color: var(--tx-mut); font-size: 13px; line-height: 1.45; padding: 12px 2px 6px; }
@@ -124,6 +128,7 @@ button:focus { outline: none; }
 
 /* ============================ Messages ============================ */
 #messages { display: flex; flex-direction: column; overflow-y: auto; min-height: 68px; max-height: 184px; padding: 0 2px; scrollbar-gutter: stable; overscroll-behavior: contain; }
+#messages:empty::before { content: 'Введите вопрос или включите запись для подсказок по разговору. Для анализа снимка укажите «на экране». Ответы появятся здесь.'; color: var(--tx-2); font-size: 13px; line-height: 1.45; padding: 12px 2px; }
 .answer-label { color: #8ab8ff; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; margin: 10px 0 0; }
 .user-bubble {
   align-self: flex-end;
@@ -256,26 +261,28 @@ button:focus { outline: none; }
   background: rgba(0,0,0,0.35); backdrop-filter: blur(4px);
 }
 #settings-scrim.hidden { display: none; }
-#settings { width: min(440px, 92vw); padding: 18px 20px; -webkit-app-region: no-drag; }
+#settings { width: min(440px, 92vw); max-height: 92vh; display: flex; flex-direction: column; padding: 18px 20px; -webkit-app-region: no-drag; }
 .s-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .s-title { font-size: 17px; font-weight: 600; color: var(--tx-1); }
 .s-close { border: none; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; padding: 6px 14px; border-radius: var(--r-pill); cursor: pointer; }
-.s-body { display: flex; flex-direction: column; gap: 8px; }
+.s-body { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px; }
 .s-label { color: var(--tx-2); font-size: 13px; font-weight: 600; margin-top: 8px; }
-.s-hint { color: var(--tx-mut); font-weight: 400; font-size: 11px; margin-left: 6px; }
+.s-hint { color: var(--tx-2); font-weight: 400; font-size: 11px; margin-left: 6px; }
 .s-seg { display: flex; gap: 6px; }
 .s-seg button { flex: 1; padding: 8px; border-radius: var(--r-8); border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.04); color: var(--tx-2); font-size: 13px; font-weight: 500; cursor: pointer; transition: all 140ms ease; }
 .s-seg button.on { border-color: var(--accent); color: #fff; background: rgba(60,131,245,0.16); }
 .s-field { display: flex; align-items: center; gap: 10px; }
-.s-field span { width: 78px; color: var(--tx-mut); font-size: 12px; }
-.s-field input { flex: 1; padding: 8px 10px; border-radius: var(--r-8); border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.25); color: var(--tx-1); font-size: 13px; font-family: var(--font); outline: none; }
-.s-field input:focus { border-color: var(--accent); }
-.s-status { color: var(--tx-mut); font-size: 12px; margin-top: 10px; min-height: 16px; }
+.s-field span, .s-field label { width: 78px; flex-shrink: 0; color: var(--tx-2); font-size: 12px; }
+.s-field input, .s-field select { flex: 1; min-width: 0; padding: 8px 10px; border-radius: var(--r-8); border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.25); color: var(--tx-1); font-size: 13px; font-family: var(--font); outline: none; }
+.s-field input:focus, .s-field select:focus { border-color: var(--accent); }
+.s-field select:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px; }
+.s-field select option { background: #20242b; color: #fff; }
+.s-status { color: var(--tx-2); font-size: 12px; line-height: 1.5; margin-top: 10px; min-height: 16px; overflow-wrap: anywhere; }
 
 /* ============================ Onboarding / tutorial ============================ */
 #onboard-scrim { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(0,0,0,0.45); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
 #onboard-scrim.hidden { display: none; }
-#onboard { width: min(470px, 93vw); padding: 26px 28px 18px; text-align: center; -webkit-app-region: no-drag; animation: overlayIn 240ms cubic-bezier(0.22,1,0.36,1); }
+#onboard { width: min(470px, 93vw); max-height: 92vh; padding: 26px 28px 18px; overflow-y: auto; overscroll-behavior: contain; text-align: center; -webkit-app-region: no-drag; animation: overlayIn 240ms cubic-bezier(0.22,1,0.36,1); }
 .ob-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 20px; }
 .ob-dots span { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,0.20); transition: all 220ms ease; }
 .ob-dots span.on { background: var(--accent); width: 20px; border-radius: 4px; }
@@ -292,10 +299,18 @@ button:focus { outline: none; }
 .ob-buttons button { flex: 1; min-width: 150px; padding: 10px; border-radius: 10px; border: 1px solid rgba(60,131,245,0.40); background: rgba(60,131,245,0.14); color: #cfe0ff; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 140ms ease; }
 .ob-buttons button:hover { background: rgba(60,131,245,0.24); }
 .ob-actions { display: flex; align-items: center; margin-top: 22px; }
-.ob-ghost { border: none; background: transparent; color: var(--tx-mut); font-size: 13px; font-weight: 500; cursor: pointer; padding: 8px 10px; border-radius: 8px; }
+.ob-ghost { border: none; background: transparent; color: var(--tx-2); font-size: 13px; font-weight: 500; cursor: pointer; padding: 8px 10px; border-radius: 8px; }
 .ob-ghost:hover { color: #fff; background: rgba(255,255,255,0.06); }
 .ob-primary { border: none; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; padding: 9px 22px; border-radius: 999px; cursor: pointer; transition: filter 140ms ease; }
 .ob-primary:hover { filter: brightness(1.08); }
+
+@media (max-width: 400px) {
+  #onboard { padding: 18px 16px; }
+  #settings { padding: 14px 12px; }
+  .s-hint { display: block; margin-left: 0; }
+  .ob-actions { flex-wrap: wrap; gap: 4px; }
+  .ob-primary { padding: 9px 16px; }
+}
 
 /* ============================ Animations ============================ */
 @keyframes overlayIn { from { opacity: 0; transform: translateY(-8px) scale(0.98); } to { opacity: 1; transform: none; } }

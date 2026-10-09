@@ -1,38 +1,26 @@
-// Speech-to-text factory. Decoupled from the LLM provider because Anthropic has
-// no audio API — we transcribe with whatever audio-capable key is available, and
-// fall back across providers. Returns { text, provider } or { text:'', error }.
+// Speech recognition is configured independently from the chat provider.
 const { pcmToWav } = require('./wav');
 
-async function transcribeOpenAI(apiKey, wav, model, baseURL) {
+async function transcribeOpenAI(apiKey, wav, model, baseURL, language) {
   const OpenAI = require('openai');
   const toFile = OpenAI.toFile || require('openai/uploads').toFile;
-  const client = new OpenAI({ apiKey, baseURL: baseURL || undefined });
+  const client = new OpenAI({ apiKey, baseURL: baseURL || undefined, timeout: 120000, maxRetries: 0 });
   const file = await toFile(wav, 'audio.wav', { type: 'audio/wav' });
-  const res = await client.audio.transcriptions.create({ file, model: model || 'whisper-1' });
+  const res = await client.audio.transcriptions.create({ file, model, ...(language && language !== 'auto' ? { language } : {}) });
   return (res.text || '').trim();
 }
 
-async function transcribeGemini(apiKey, wav, baseURL, model) {
-  const OpenAI = require('openai');
-  const client = new OpenAI({ apiKey, baseURL: baseURL || undefined });
-  const res = await client.chat.completions.create({
-    model: model || 'gemini-3-flash',
-    messages: [{ role: 'user', content: [
-      { type: 'text', text: 'Transcribe this audio verbatim. Return only clearly spoken words, with no commentary or completion. If the audio is silence, noise, music, an echo, or unclear, return an empty response. Never invent or guess words.' },
-      { type: 'input_audio', input_audio: { data: wav.toString('base64'), format: 'wav' } }
-    ] }],
-    max_tokens: 900,
-    temperature: 0
-  });
-  return (((res && res.choices && res.choices[0] && res.choices[0].message && res.choices[0].message.content) || '')).trim();
-}
 
 function createSTT(settings) {
-  const keys = settings.apiKeys || {};
-  const baseURLs = settings.baseURLs || {};
   const chain = [];
-  if (keys.openai) chain.push({ p: 'openai', fn: (wav) => transcribeOpenAI(keys.openai, wav, settings.sttModel, baseURLs.openai) });
-  if (keys.gemini) chain.push({ p: 'gemini', fn: (wav) => transcribeGemini(keys.gemini, wav, baseURLs.gemini, settings.sttModel || 'gemini-3-flash') });
+  if (!settings.sttProvider || settings.sttProvider === 'local') {
+    const endpoint = settings.sttBaseURL || 'http://127.0.0.1:8765/v1';
+    const url = new URL(endpoint);
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Локальное распознавание требует адрес loopback.');
+    chain.push({ p: 'local', fn: (wav) => transcribeOpenAI('local', wav, settings.sttModel || 'small', endpoint, settings.sttLanguage) });
+  } else if (settings.sttProvider === 'openai') {
+    if (settings.sttApiKey) chain.push({ p: 'openai', fn: (wav) => transcribeOpenAI(settings.sttApiKey, wav, settings.sttModel || 'whisper-1', settings.sttBaseURL || 'https://api.openai.com/v1', settings.sttLanguage) });
+  }
 
   return {
     available: chain.length > 0,

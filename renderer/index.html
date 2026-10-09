@@ -26,6 +26,10 @@
             <span class="view-title">Живой конспект</span>
             <span id="transcript-count">Нет реплик</span>
           </div>
+          <div id="audio-sources" role="status" aria-live="polite">
+            <span id="audio-you">Микрофон: ожидание статуса</span>
+            <span id="audio-them">Звук компьютера: ожидание статуса</span>
+          </div>
           <div id="live-transcript" role="log" aria-live="polite"></div>
         </section>
 
@@ -49,8 +53,8 @@
 
         <div id="composer">
           <div id="input-area">
-            <div id="placeholder">Спросите о происходящем на экране или в разговоре либо нажмите <span class="keycap">⌘</span><span class="keycap">⏎</span> для помощи</div>
-            <textarea id="input" rows="1" spellcheck="false"></textarea>
+            <div id="placeholder">Спросите о происходящем на экране или в разговоре либо нажмите <span class="keycap" id="modifier-hint"></span><span class="keycap">Enter</span> для помощи</div>
+            <textarea id="input" rows="1" spellcheck="false" aria-label="Вопрос об экране или разговоре"></textarea>
           </div>
           <div id="composer-bottom">
             <button id="smart-toggle" class="smart-pill"><span class="ic"></span><span>Умный режим</span></button>
@@ -66,9 +70,9 @@
 
   <!-- Settings -->
   <div id="settings-scrim" class="hidden">
-    <div id="settings" class="glass">
+    <div id="settings" class="glass" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="s-head">
-        <div class="s-title">Настройки</div>
+        <div class="s-title" id="settings-title">Настройки</div>
         <button id="s-close" class="s-close">Готово</button>
       </div>
       <div class="s-body">
@@ -91,18 +95,25 @@
         <div class="s-field"><span>Быстрая</span><input id="model-fast" type="text" autocomplete="off" /></div>
         <div class="s-field"><span>Умная</span><input id="model-smart" type="text" autocomplete="off" /></div>
 
-        <div class="s-status" id="s-status"></div>
+        <label class="s-label" for="stt-provider">Распознавание речи <span class="s-hint">независимо от провайдера ИИ</span></label>
+        <div class="s-field"><span>Сервис</span><select id="stt-provider"><option value="local">Локальный Whisper</option><option value="openai">OpenAI-совместимый API</option></select></div>
+        <div class="s-field"><label for="stt-base-url">URL</label><input id="stt-base-url" type="url" autocomplete="off" /></div>
+        <div class="s-field"><label for="stt-model">Модель</label><input id="stt-model" type="text" autocomplete="off" /></div>
+        <div class="s-field"><label for="stt-api-key">Ключ речи</label><input id="stt-api-key" type="password" autocomplete="off" placeholder="Необязателен для локального сервиса" /></div>
+        <div class="s-field"><label for="stt-language">Язык речи</label><select id="stt-language"><option value="auto">Определять автоматически</option><option value="ru">Русский</option><option value="en">Английский</option></select></div>
+        <div class="s-status" id="stt-help"></div>
+        <div class="s-status" id="s-status" role="status"></div>
       </div>
     </div>
   </div>
 
   <!-- First-run tutorial / walkthrough -->
   <div id="onboard-scrim" class="hidden">
-    <div id="onboard" class="glass">
+    <div id="onboard" class="glass" role="dialog" aria-modal="true" aria-labelledby="ob-title">
       <div class="ob-dots" id="ob-dots"></div>
       <div class="ob-icon" id="ob-icon"></div>
       <div class="ob-title" id="ob-title"></div>
-      <div class="ob-body" id="ob-body"></div>
+      <div class="ob-body" id="ob-body" aria-live="polite"></div>
       <div class="ob-buttons" id="ob-buttons"></div>
       <div class="ob-actions">
         <button id="ob-skip" class="ob-ghost">Пропустить</button>
